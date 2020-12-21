@@ -1,0 +1,469 @@
+---
+title: "Final Report: Analysis of Wildfires in the United States from 1992-2015"
+author: "Polina Bondarenko, Jason Han, Ben Lipka, Milan Rajababoo"
+date: "12/17/2020"
+output: 
+  html_document:
+    theme: readable
+    toc: no 
+runtime: shiny
+---
+
+<style>
+  .shiny-frame{
+    height: 800px;
+  }
+  }
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+```
+
+# Introduction
+Our team investigated wildfire data from the U.S Department of Agriculture. As climate change continues to alter the planet, natural disasters such as wildfires are becoming more volatile. A key to reducing the magnitude of these disasters is identifying critical trends that can help first responders predict potential fires which would allow them to act quickly. Additionally, understanding why and how wildfires are changing because of global warming can lead to breakthroughs in other environmental sectors.
+
+This data set contains spatial and temporal information about wildfires which have occurred in the United States between 1992 and 2015. Collection of the data was funded by the US Department of Agriculture to support the national Fire Program Analysis (FPA) system. There are 1.88 million total observations taken over the 24 year time period.
+
+* [Load Libraries](#Libraries)
+* [Extract the Data](#Extract)
+* [Subset the Data](#Subset)
+* [Shiny App](#Shiny)
+* [Shiny Map Visualizations](#Maps)
+* [Shiny Number of Wildfires over Time](#Barplots)
+* [Shiny Pie Charts](#Pie)
+* [Modeling the Cause of a Wildfire](#Modeling)
+* [Future Investigations](#FutureInvestigations)
+* [Conclusion](#Conclusion)
+* [References](#References)
+
+
+## Load Libraries {#Libraries}
+
+First, we need to load several libraries in preparation for extracting, cleaning, and visualizing the data. Since the data is a SQLite file, we first need to load the RSQLite and dbplyr libraries to obtain the data. Other libraries such as ggplot2 will be used for visualization and data analysis.
+
+```{r, message = FALSE}
+library(RSQLite)
+library(dbplyr)
+library(dplyr)
+library(usmap)
+library(shiny)
+library(purrr)
+library(ggplot2)
+library(xts)
+library(rpart)
+library(caret)
+library(randomForest)
+```
+
+
+## Extract the Data {#Extract}
+
+After loading the necessary libraries, we can extract the data using SQLite and load it into a dataframe for convenience and speed. 
+
+
+```{r} 
+fileName <- "https://www.fs.usda.gov/rds/archive/products/RDS-2013-0009.4/RDS-2013-0009.4_SQLITE.zip"
+temp <- tempfile()
+download.file(fileName, temp)
+unzip(temp, "Data/FPA_FOD_20170508.sqlite")
+# create db connection
+con <- dbConnect(SQLite(), dbname="FPA_FOD_20170508.sqlite")
+# list all tables
+dbListTables(con)
+# pull the fires table
+fires <- tbl(con, "Fires") %>% collect()
+# show glimpse of data set
+glimpse(fires)
+unlink(temp)
+```
+
+## Subset the Data {#Subset}
+
+After taking a glimpse into the data, we can subset the data by selecting important columns, reformatting the date columns, and adding a column for fire duration (in days). From the given variables, we choose to focus on NWCG Reporting Agency, Fire Name, Fire Year, Discovery Date, Cause of Fire, Fire Duration (days), Fire Size (square acres), State, and County for our analysis. Then, we remove NA values and are left with a subset of 402628 observations and 16 variables.
+
+```{r}
+# subset by selecting important columns, reformatting date columns, and adding fire duration (in days) column
+subsetFire <- dbGetQuery(con, 
+                       "SELECT NWCG_REPORTING_AGENCY, NWCG_REPORTING_UNIT_NAME, FIRE_NAME, FIRE_YEAR, 
+                       date(DISCOVERY_DATE) as DISCOVERY_DATE, DISCOVERY_DOY, STAT_CAUSE_CODE, STAT_CAUSE_DESCR, 
+                       date(CONT_DATE) as CONT_DATE, CONT_DOY, FIRE_SIZE, FIRE_SIZE_CLASS, OWNER_DESCR, STATE, COUNTY,
+                       FIPS_CODE,FIPS_NAME, (CONT_DOY-DISCOVERY_DOY+1) as DURATION_DAYS
+                       FROM fires;")
+# remove NA values: over 1.4 million observations removed
+cleanedFire <- na.omit(subsetFire)
+cleanedFire <- cleanedFire %>% filter(DURATION_DAYS>0)
+cleanedFire$fips <- paste0(fips(cleanedFire$STATE),cleanedFire$FIPS_CODE)
+# disconnect from database
+dbDisconnect(con)
+# first 10 observations of subset
+head(cleanedFire, 10)
+```
+
+## Shiny App {#Shiny}
+
+```{r, echo=FALSE}
+library(shiny)
+library(usmap)
+library(RSQLite)
+library(dbplyr)
+library(dplyr)
+library(purrr)
+library(ggplot2)
+library(xts)
+library(ggfortify)
+library(ggthemes)
+library(maps)
+library(mapdata)
+library(leaflet)
+library(mapproj)
+library(stats)
+library(data.table)
+#library(hrbrthemes) #Comment out this + ggiraph
+#this package might cause you problems. you might need to download something called XQuartz
+library(dygraphs)
+library(plotly)
+library(highcharter)
+#library(ggiraph) #comment out this + hrbrthemes and it should work but not what we want
+#this package might cause you problems. you might need to download something called XQuartz
+library(shinythemes)
+
+#### data related to maps
+options(dplyr.summarise.inform = FALSE)
+cleanedFire <- cleanedFire %>% filter(DURATION_DAYS>0)
+cleanedFire$fips <- paste0(fips(cleanedFire$STATE),cleanedFire$FIPS_CODE)
+
+fires_state <- cleanedFire %>% 
+  select(state=STATE, DURATION_DAYS, FIRE_SIZE) %>%
+  group_by(state) %>%
+  summarize(n = n(), DURATION_DAYS=mean(DURATION_DAYS), FIRE_SIZE=mean(FIRE_SIZE))
+fires_county <- cleanedFire %>% 
+  select(fips, DURATION_DAYS, FIRE_SIZE) %>%
+  group_by(fips) %>%
+  summarize(n = n(), DURATION_DAYS=mean(DURATION_DAYS), FIRE_SIZE=mean(FIRE_SIZE))
+#### data related to bar graphs
+fires_state_yr <- cleanedFire %>% 
+  select(state=STATE, FIRE_YEAR) %>%
+  group_by(FIRE_YEAR,state) %>%
+  summarize(number_of_fires = n())
+### code pertaining to pie charts
+causes_count_df = cleanedFire %>%
+  count(STAT_CAUSE_DESCR)
+states_count_df = cleanedFire%>%
+  count(STATE)
+owner_count_df = cleanedFire %>%
+  count(OWNER_DESCR)
+firesize_count_df = cleanedFire%>%
+  count(FIRE_SIZE_CLASS)
+#### SHINY
+ui <- shinyUI(navbarPage(theme = shinytheme("united"), "Wildfires in the United States",
+                         
+                         tabPanel("Map Visualization",
+                                  sidebarPanel(
+                                    # Input: Selector for variable to plot ----
+                                    selectInput("variable", "Variable:",
+                                                c("Total Count" = "n",
+                                                  "Wildfire Duration" = "DURATION_DAYS",
+                                                  "Wildfire Size" = "FIRE_SIZE")), 
+                                  ),
+                                  
+                                  # Main panel for displaying outputs ----
+                                  mainPanel(
+                                    # Output: Plot of the requested variable ----
+                                    plotOutput("usFirePlot"),
+                                  )
+                         ),
+                         
+                         tabPanel("State Map Visualization",
+                                  sidebarPanel(
+                                    # Input: Selector for variable to plot ----
+                                    selectInput("variable2", "Variable:",
+                                                c("Total Count" = "n",
+                                                  "Wildfire Duration" = "DURATION_DAYS",
+                                                  "Wildfire Size" = "FIRE_SIZE")), 
+                                    selectInput("state", "State:",
+                                                c(state.abb)),
+                                  ),
+                                  
+                                  # Main panel for displaying outputs ----
+                                  mainPanel(
+                                    # Output: Plot of the requested variable ----
+                                    plotOutput("stateFirePlot")
+                                  )
+                         ),
+                         
+                         tabPanel("Wildfires by Year",
+                                  sidebarPanel(
+                                    # Input: Selector for choosing dataset ----
+                                    selectInput(inputId = "dataset",
+                                                label = "Choose a State:",
+                                                choices = c(state.abb)),
+                                  ),
+                                 mainPanel("Bar Plots",
+                                          fluidRow(
+                                            splitLayout(cellWidths = c("50%", "50%"), plotOutput("plot"), plotOutput("overallFires"))
+                                          ),
+                                          tableOutput("summary"),
+                                )
+                         ),
+                         tabPanel("Pie Chart Visualization",
+                                  sidebarPanel(
+                                    # Input: Selector for variable to plot ----
+                                    selectInput(inputId = "pie",
+                                                label = "Choose a Pie Chart:",
+                                                choices = c("Fire Cause", "Fire Size", "Owner of Land")),
+                                  ),
+                                  # Main panel for displaying outputs ----
+                                  
+                                  mainPanel(
+                                    # Output: Plot of the requested variable ----
+                                    tabsetPanel(type = "tabs",
+                                                tabPanel("Pie Chart", highchartOutput("Pieplot"))
+                                    )
+                                  )
+                         )
+                    
+)
+)
+# Define server logic to summarize and view selected dataset ----
+server <- function(input, output) {
+  
+  # Make title for plot based on input variable ----
+  name <- reactive({
+    if (input$variable=="n") {
+      paste("Total Number of Wildfires")
+    } else if (input$variable=="DURATION_DAYS") {
+      paste("Average Wildfire Duration")
+    } else if (input$variable=="FIRE_SIZE") {
+      paste("Average Size of Wildfires")
+    }
+  })
+  
+  # Make caption for plot based on input variable ----
+  caption <- reactive({
+    if (input$variable=="n") {
+      paste("Number of Wildfires")
+    } else if (input$variable=="DURATION_DAYS") {
+      paste("Wildfire Duration (Days)")
+    }  else if (input$variable=="FIRE_SIZE") {
+      paste("Wildfire Size (Sq. Acres)")
+    }
+  })
+  
+  # Function to plot the requested variable ----
+  plotUSFunc <- function() {
+    plot_usmap(data = fires_state, values = input$variable, color = "gray", labels=TRUE) + 
+      scale_fill_continuous(name = caption(), label = scales::comma, type = "viridis") + 
+      labs(title = paste0(name()," by State between 1992 and 2015"), 
+           caption = "Source: Forest Service Research Data Archive") +
+      theme(plot.title = element_text(face="bold", size = 12, hjust = 0.5), plot.caption = element_text(size = 12, hjust=0), 
+            legend.position = "right", legend.title=element_text(size=12), legend.text = element_text(size=11), panel.background = element_rect(fill = "lightblue"))
+  }
+  
+  name2 <- reactive({
+    if (input$variable2=="n") {
+      paste("Total Number of Wildfires")
+    } else if (input$variable2=="DURATION_DAYS") {
+      paste("Average Wildfire Duration")
+    } else if (input$variable2=="FIRE_SIZE") {
+      paste("Average Size of Wildfires")
+    }
+  })
+  
+  # Make caption for plot based on input variable ----
+  caption2 <- reactive({
+    if (input$variable2=="n") {
+      paste("Number of Wildfires")
+    } else if (input$variable2=="DURATION_DAYS") {
+      paste("Wildfire Duration (Days)")
+    }  else if (input$variable2=="FIRE_SIZE") {
+      paste("Wildfire Size (Sq. Acres)")
+    }
+  })
+  
+  plotStateFunc <- function() {
+    plot_usmap(regions = "county", include=c(input$state), data = fires_county, values = input$variable2, color = "gray") + 
+      scale_fill_continuous(name = caption2(), label = scales::comma, type = "viridis") + 
+      labs(title = paste0(name2(), " in ", input$state, " between 1992 and 2015"), caption = "Source: Forest Service Research Data Archive") +
+      theme(plot.title = element_text(face="bold", size = 12, hjust = 0.5), plot.caption = element_text(size = 12, hjust=0), 
+            legend.position = "right", legend.title=element_text(size=12), legend.text = element_text(size=11), 
+            panel.background = element_rect(fill = "lightblue"))
+  }
+  
+  
+  # Generate a plot of the requested variable ----
+  output$usFirePlot <- renderPlot({
+    plotUSFunc()
+  })
+  
+  output$stateFirePlot <- renderPlot({
+    plotStateFunc()
+  })
+  
+  # Return the requested dataset ----
+  datasetInput <- reactive({
+    df <- fires_state_yr[fires_state_yr$state==input$dataset,]
+    df
+  })
+  
+    plotOverall <- function() {
+    ggplot(data = fires_state_yr, aes(x=FIRE_YEAR,y = number_of_fires )) +geom_bar(stat = 'identity', fill = 'red') +
+      geom_smooth(method = 'lm', se = FALSE, size = 0.4, color = 'black') +
+      labs(x = 'Fire Year', y = 'Number of wildfires', title = 'Wildfires by Year in the Entire Country')
+  }
+  output$overallFires <- renderPlot({
+    plotOverall()
+  })
+  
+  
+  output$plot <- renderPlot({
+    ggplot(data = datasetInput(), aes(x=FIRE_YEAR,y = number_of_fires )) +geom_bar(stat = 'identity', fill = 'red') +
+      geom_smooth(method = 'lm', se = FALSE, size = 0.4, color = 'black') +
+      labs(x = 'Fire Year', y = 'Number of wildfires', title = 'Wildfires by Year')
+  })
+  
+  # Generate a summary of the data ----
+  output$summary <- renderTable({
+    summary(datasetInput()[c("number_of_fires")])
+  })
+  
+  # Return the requested pie plot ----
+  pieInput <- reactive({
+    if (input$pie=="Fire Cause") {
+      pie_df <- data.frame(
+        count = causes_count_df$n,
+        label = causes_count_df$STAT_CAUSE_DESCR
+      )
+    } else if (input$pie=="Fire Size") {
+      pie_df = data.frame(
+        count = firesize_count_df$n,
+        label = firesize_count_df$FIRE_SIZE_CLASS
+      )
+    } else if (input$pie=="Owner of Land") {
+      pie_df = data.frame(
+        count = owner_count_df$n,
+        label = owner_count_df$OWNER_DESCR
+      ) 
+    }
+    pie_df
+  })
+  
+  # Function to plot pie ----
+  plotPie <- function() {
+    pieInput() %>%
+      hchart(
+        "pie", hcaes(x = label, y = count),
+        name = "Wildfire Count"
+      )
+  }
+  
+  # Generate a plot of the requested variable ----
+  output$Pieplot <- renderHighchart({
+    plotPie()
+  })
+  
+}
+# Create Shiny app ----
+shinyApp(ui = ui, server = server)
+```
+
+### Shiny Map Visualizations {#Maps}
+The first two tabs in the Shiny app are interactive maps which help the user identify which states are more fire-prone than others. In order to do this, we use the usmap package to visualize the wildfire data onto a map of the entire United States in the first tab, and then by individual states in the second tab. We also use the shiny package to allow the user to select one of the following variables: total number of wildfires, average wildfire time duration, and average wildfire size. 
+At a glance, the first tab shows that Georgia, California, and Oregon have had the highest number of wildfires over the 24 year time period. However, when comparing wildfire duration, Alaska and New Jersey have the longest average burn time. Alaska also has the largest average wildfire size in square acres. 
+Let's take a look at each state individually in the second tab and break these variables down by county. Here, we can see which counties suffered from the greatest number of wildfires, as well as average wildfire duration and size in each county. For instance, Alaska's Yukon–Koyukuk County is the largest county in the United States, but it also has the lowest population density. This county has an average burn time of 50 days for each wildfire, with over 30,000 square acres burned per fire. This is likely due to the fact that county is very rural, and there are less firefighters and resources in the area for putting out the fires. 
+
+### Shiny Barplot: Number of Wildfires over Time {#Barplots}
+The third tab shows the number of wildfires over time for all 50 States sorted alphabetically. Using base R and dplyr, the barplots graph for each individual year and creates a trendline to determine whehter fires are increasing or decreasing over time. There is also a summary table beneath each graph to specifically reveal how the number of fires has differentiated over time. Combining information from the map charts and the barplots, we can see how the east coast compares to the west coast in terms of wildfires. For example, New Jersey had a maximum value of fires of 4 in 2012 with an overall average value of 2 fires while in that same year California had over 1,500 fires with an overall average of 1,548 fires. This is as exepected as states in the west coast are much more prone to fires due to the dryer vegetation and changing climate that is fueling more opportunities for a fire to occur. 
+
+### Shiny Pie Charts {#Pie}
+Another tab within the Shiny app presents multiple interactive pie charts that  the distribution of fire causes, states with fires, ownership of land with fires, and fire size. We used the ‘highcharter’ package to create the visualization and the ‘dplyr’ package to navigate through the data set. The first step was to construct four data frames that contain the count and name of each variable using ‘dplyr’. After that, we created an additional four data frames that assign each column of the previous data frames as new variables. The final step was to construct four returnable variables that contain the high() function, allowing us to fit the data into a pie chart format.
+Looking at the fire cause chart, lightning clearly takes up a high percentage of the graph. 	This may be because regulations can decrease the risk of other causes from occurring, but lightning is random and uncontrollable. The states graph reveals that Georgia has the most fires, a surprising fact considering that California typically has more coverage on their fires. The ownership graph is straightforward and simply shows that fires occur more frequently on private property. For fire size, approximately 80% of fires rank in the A or B class, meaning that the fires range from 0 to 9.9 acres in size. Analyzing this indicates that most fires are relatively small, which makes sense logically as massive fires do not occur often.
+
+### Modeling the Cause of a Wildfire {#Modeling}
+As a final piece of the United States wildfire analysis, we attempted to build a model which classifies the cause of the fire given a number of statistics that were decided to be strong predictors. These variables can be seen below.
+```{r}
+fires$DURATION_DAYS <- fires$CONT_DATE - fires$DISCOVERY_DATE
+subset <- c("SOURCE_SYSTEM_TYPE", "LATITUDE", "LONGITUDE", "FIRE_YEAR", "STAT_CAUSE_CODE", "FIRE_SIZE", "OWNER_DESCR", "STATE", "DURATION_DAYS")
+subFire <- fires[, subset]
+subFire <- na.omit(subFire)
+```
+
+Additionally, the 12 existing fire causes are very specific and would prove to be an extremely convoluted classification problem. Our modeling efforts with the 12 fire causes resulted in an accuracy of approximately 15%. This can definitely be improved upon.
+
+```{r, echo=FALSE}
+table(fires$STAT_CAUSE_DESCR)
+```
+
+Instead, these causes were converted to 4 broader groups. The "cause" groups are now as follows: natural causes (lightning, debris burning), human technology (equipment use, railroad, powerline, structure), human non-malicious (smoking, campfire, children, fireworks), and human malicious (arson). 
+
+```{r, echo=FALSE}
+subFire$CAUSE = dplyr::case_when(
+  subFire$STAT_CAUSE_CODE == 1 ~ 1,
+  subFire$STAT_CAUSE_CODE == 2 ~ 2,
+  subFire$STAT_CAUSE_CODE == 3 ~ 3,
+  subFire$STAT_CAUSE_CODE == 4 ~ 3,
+  subFire$STAT_CAUSE_CODE == 5 ~ 1,
+  subFire$STAT_CAUSE_CODE == 6 ~ 2,
+  subFire$STAT_CAUSE_CODE == 7 ~ 4,
+  subFire$STAT_CAUSE_CODE == 8 ~ 3,
+  subFire$STAT_CAUSE_CODE == 10 ~ 3,
+  subFire$STAT_CAUSE_CODE == 11 ~ 2,
+  subFire$STAT_CAUSE_CODE == 12 ~ 2,
+)
+subFire <- na.omit(subFire)
+subset <- c("SOURCE_SYSTEM_TYPE", "LATITUDE", "LONGITUDE", "FIRE_YEAR", "CAUSE", "FIRE_SIZE", "OWNER_DESCR", "STATE", "DURATION_DAYS")
+subFire <- subFire[, subset]
+```
+
+Now that we have the variable and dataset we wish to build a classification model with properly redefined, we will sample the data as our machines are not powerful enough to build advanced models with this many observations. Also, we will split this sample dataset into training and testing sets at an 80/20 split.
+
+```{r}
+set.seed(2)
+testSubset <- subFire[sample(1:nrow(subFire), 10000, replace=FALSE),]
+trn_idx <- sample(nrow(testSubset), size=0.8 * nrow(testSubset))
+fire_trn <- testSubset[trn_idx, ]
+fire_tst <- testSubset[-trn_idx, ]
+```
+
+With our training and testing sets prepared, we can begin to prepare our models. Many models may be appropriate here, such as logistic regression and k-nearest neighbors, but for the purpose of this analysis we have decided to focus on decision tree and random forest models. 
+
+```{r, echo=FALSE, warning=FALSE}
+tree_mod <- rpart(CAUSE ~ ., data=fire_trn)
+rf_mod <- randomForest(
+  CAUSE ~ .,
+  data=fire_trn
+)
+```
+
+With models built on our training dataset, we will now test the accuracy of the model's predictions on the testing dataset. We will do so using a function to calculate the mean occurrences where the actual value is not equal to the predicted value. 
+
+```{r, echo=FALSE}
+tree_preds <- predict(tree_mod, fire_tst)
+tree_preds <- round(tree_preds)
+rf_preds <- predict(rf_mod, newdata=fire_tst)
+rf_preds <- round(rf_preds)
+calc_acc <- function(actual, predicted) {
+  1-mean(actual != predicted)
+}
+```
+
+
+```{r}
+100*calc_acc(fire_tst$CAUSE, tree_preds)
+100*calc_acc(fire_tst$CAUSE, rf_preds)
+```
+
+As seen, models with our reclassified fire causes perform twice as well as with our original datasets. Both the classification tree and random forest models perform at very similar levels of accuracy. Depending on seed and size of sample, we are average about 28-30% accuracy. This is still not ideal and there is a lot of room for error, but given the complexity of this classification problem and the wide array of causes, these models definitely provide a useful framework for predicting the cause of a wildfire. 
+
+## Future Investigations {#FutureInvestigations}
+
+There are a few clear paths for moving forward with this analysis. The first would be to utilize other datasets that have to do with wildfire statistics. One example of this would be weather and temperature data from days where there were wildfires. Another example could be an analysis of the specific trees that burned in the wildfires to determine how different tree species react to wildfires. Both of these would likely assist in strengthening our classification models to higher degrees of accuracy.
+
+## Conclusion {#Conclusion}
+
+This project allowed us to utilize skills which we learned from the course material throughout the semester. Specifically, using the information covered in Week 2, we were able to document all entries for the project via GitHub, and we used git for our intermediate steps. Additionally, SQL, markdown, and R were integral components of the course which we relied heavily on to complete our project. We applied techniques from Week 4 for extracting, cleaning, and subsetting data in RSQLite to work with the wildfire dataset in this project. Furthermore, we used core material such as the data.table and dplyr libraries for data wrangling and manipulation, which were covered in Week 7. For exploration and visualization of the data, we used packages such as ggplot2 from Week 9, and eventually were able to build a Shiny dashboard with several functional tabs after Week 10. Lastly, we gained experience with other notable packages, such as dygraphs and randomForest for modeling. 
+
+## References {#References}
+
+- Short, Karen C. 2017. Spatial wildfire occurrence data for the United States, 1992-2015 [FPA_FOD_20170508]. 4th Edition. Fort Collins, CO: Forest Service Research Data Archive. https://doi.org/10.2737/RDS-2013-0009.4
+- Walters, Troy. 2017. Wildfire Exploratory Analysis. Version 39. Kaggle. https://www.kaggle.com/captcalculator/wildfire-exploratory-analysis/

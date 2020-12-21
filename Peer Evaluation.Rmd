@@ -1,0 +1,31 @@
+---
+title: "Peer Evaluation"
+author: "Polina Bondarenko, Jason Han, Ben Lipka, Milan Rajababoo"
+date: "12/17/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Communication and Teamwork
+Our team collaborated very well because we were accepting of each other's ideas and leaned into the strengths of each group member to create our final project. Throughout the semester, our group would communicate by scheduling 30 to 45 minute Zoom meetings. During these meetings, each group member would present their findings and we would discuss next steps and delegate tasks to complete before the next meeting. This way, we were able to minimize duplicated work. No group member was absent for any of the meetings, and each member contributed equally to the discussion. Many tasks, such as subsetting and cleaning the data, were completed together during these meetings. Similarly, everyone contributed to interpreting the results of our analysis and writing the final report.
+
+# Who Did What?
+This section outlines how each group member contributed to the final project.  
+
+### Polina Bondarenko
+Polina found the initial dataset online, formed the group, and also created a Google document to brainstorm and organize ideas for analysis. She also created new variables for wildfire time duration and reformatted the original date columns in SQLite for convenience. She also used the packages usmaps and shiny to make interactive maps for wildfires in the entire United States and for each state to show which states and counties are the most and least fire-prone. The user can input one of three variables to look at: total number of wildfires, fire duration, or fire size. Polina also created the layout for the Rmarkdown files for the final report, peer evaluation, and presentation slides.  
+
+### Jason Han
+Jason created a Shiny app which has several tabs for different functions such as barplots, tables, and summary table for each state. Jason also combined his Shiny apps with Polina's into one cohesive and user-friendly app. In addition, Jason was heavily involved in cleaning the data by removing missing values and leading the discussion when choosing the most important variables. He also created several regression models between different variables to explore the dataset further. 
+
+### Benjamin Lipka
+Ben focused on making visualizations in ggplot2 to represent the information provided in the data and to help answer interesting questions. For example, Ben was able to show the change in the amount of time it takes to put out a fire over the 24 year time period. Ben also built a tree model to predict the cause of a wildfire with approximately 30% accuracy. Considering that most of the wildfire dataset is qualitative, this is already a notable result. Ben also helped to clean and subset the data.
+
+### Milan Rajababoo
+Milan was the first group member to extract the data using SQLite and contributed to the discussion when subsetting the data. Milan created several visualizations to represent the data such as an interactive pie chart to show the causes of wildfires. Milan combined his visualizations with Ben's into a Shiny app. He also identified the strongest predictors for predicting the cause of a wildfire. In addition, Milan investigated which variables have a high correlation with each other and built several exploratory models.
+
+# Conclusion
+This project allowed us to grow both in our technical and interpersonal skills. We became more confident using GitHub to commit and push changes. Furthermore, we used the skills which were taught in class to complete the project. Most notably, we became more experienced and comfortable with the following packages: shiny, ggplot2, dplyr, RSQLite, dygraphs, and others. Lastly, we were able to improve our presentation skills and work together in a team, which was a great experience to help us prepare for our careers after graduation.

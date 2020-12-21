@@ -1,0 +1,293 @@
+<style>
+  .shiny-frame{
+    height: 800px;
+  }
+  }
+</style>
+  
+```{r, include=FALSE}
+#make sure working directory is correct
+library(shiny)
+library(usmap)
+library(RSQLite)
+library(dbplyr)
+library(dplyr)
+library(purrr)
+library(ggplot2)
+library(xts)
+library(ggfortify)
+library(ggthemes)
+library(maps)
+library(mapdata)
+library(leaflet)
+library(mapproj)
+library(stats)
+library(data.table)
+#library(hrbrthemes) #Comment out this + ggiraph
+#this package might cause you problems. you might need to download something called XQuartz
+library(dygraphs)
+library(plotly)
+library(highcharter)
+#library(ggiraph) #comment out this + hrbrthemes and it should work but not what we want
+#this package might cause you problems. you might need to download something called XQuartz
+library(shinythemes)
+# create db connection
+conn <- dbConnect(SQLite(), 'FPA_FOD_20170508.sqlite')
+# pull the fires table into RAM
+fires <- tbl(conn, "Fires") %>% collect()
+# check size
+print(object.size(fires), units = 'Gb')
+# disconnect from db
+# subset by selecting important columns, reformatting date columns, and adding fire duration (in days) column
+subsetFire <- dbGetQuery(conn, 
+                         "SELECT NWCG_REPORTING_AGENCY, NWCG_REPORTING_UNIT_NAME, FIRE_NAME, FIRE_YEAR, 
+                       date(DISCOVERY_DATE) as DISCOVERY_DATE, DISCOVERY_DOY, STAT_CAUSE_CODE, STAT_CAUSE_DESCR, 
+                       date(CONT_DATE) as CONT_DATE, CONT_DOY, FIRE_SIZE, FIRE_SIZE_CLASS, OWNER_DESCR, STATE, COUNTY,
+                       FIPS_CODE,FIPS_NAME, (CONT_DOY-DISCOVERY_DOY+1) as DURATION_DAYS
+                       FROM fires;")
+# remove NA values: over 1.4 million observations removed
+#Dataset we will use for the rest of the code
+cleanedFire <- na.omit(subsetFire)
+cleanedFire <- cleanedFire %>% filter(DURATION_DAYS>0)
+cleanedFire$fips <- paste0(fips(cleanedFire$STATE),cleanedFire$FIPS_CODE)
+dbDisconnect(conn)
+```
+
+```{r, echo=FALSE}
+#### data related to maps
+options(dplyr.summarise.inform = FALSE)
+fires_state <- cleanedFire %>% 
+  select(state=STATE, DURATION_DAYS, FIRE_SIZE) %>%
+  group_by(state) %>%
+  summarize(n = n(), DURATION_DAYS=mean(DURATION_DAYS), FIRE_SIZE=mean(FIRE_SIZE))
+fires_county <- cleanedFire %>% 
+  select(fips, DURATION_DAYS, FIRE_SIZE) %>%
+  group_by(fips) %>%
+  summarize(n = n(), DURATION_DAYS=mean(DURATION_DAYS), FIRE_SIZE=mean(FIRE_SIZE))
+#### data related to bar graphs
+fires_state_yr <- cleanedFire %>% 
+  select(state=STATE, FIRE_YEAR) %>%
+  group_by(FIRE_YEAR,state) %>%
+  summarize(number_of_fires = n())
+### code pertaining to pie charts
+causes_count_df = cleanedFire %>%
+  count(STAT_CAUSE_DESCR)
+states_count_df = cleanedFire%>%
+  count(STATE)
+owner_count_df = cleanedFire %>%
+  count(OWNER_DESCR)
+firesize_count_df = cleanedFire%>%
+  count(FIRE_SIZE_CLASS)
+#### SHINY
+ui <- shinyUI(navbarPage(theme = shinytheme("united"), "Wildfires in the United States",
+                         
+                         tabPanel("Map Visualization",
+                                  sidebarPanel(
+                                    # Input: Selector for variable to plot ----
+                                    selectInput("variable", "Variable:",
+                                                c("Total Count" = "n",
+                                                  "Wildfire Duration" = "DURATION_DAYS",
+                                                  "Wildfire Size" = "FIRE_SIZE")), 
+                                  ),
+                                  
+                                  # Main panel for displaying outputs ----
+                                  mainPanel(
+                                    # Output: Plot of the requested variable ----
+                                    plotOutput("usFirePlot"),
+                                  )
+                         ),
+                         
+                         tabPanel("State Map Visualization",
+                                  sidebarPanel(
+                                    # Input: Selector for variable to plot ----
+                                    selectInput("variable2", "Variable:",
+                                                c("Total Count" = "n",
+                                                  "Wildfire Duration" = "DURATION_DAYS",
+                                                  "Wildfire Size" = "FIRE_SIZE")), 
+                                    selectInput("state", "State:",
+                                                c(state.abb)),
+                                  ),
+                                  
+                                  # Main panel for displaying outputs ----
+                                  mainPanel(
+                                    # Output: Plot of the requested variable ----
+                                    plotOutput("stateFirePlot")
+                                  )
+                         ),
+                         
+                         tabPanel("Wildfires by Year",
+                                  sidebarPanel(
+                                    # Input: Selector for choosing dataset ----
+                                    selectInput(inputId = "dataset",
+                                                label = "Choose a State:",
+                                                choices = c(state.abb)),
+                                  ),
+                                 mainPanel("Bar Plots",
+                                          fluidRow(
+                                            splitLayout(cellWidths = c("50%", "50%"), plotOutput("plot"), plotOutput("overallFires"))
+                                          ),
+                                          tableOutput("summary"),
+                                )
+                         ),
+                         tabPanel("Pie Chart Visualization",
+                                  sidebarPanel(
+                                    # Input: Selector for variable to plot ----
+                                    selectInput(inputId = "pie",
+                                                label = "Choose a Pie Chart:",
+                                                choices = c("Fire Cause", "Fire Size", "Owner of Land")),
+                                  ),
+                                  # Main panel for displaying outputs ----
+                                  
+                                  mainPanel(
+                                    # Output: Plot of the requested variable ----
+                                    tabsetPanel(type = "tabs",
+                                                tabPanel("Pie Chart", highchartOutput("Pieplot"))
+                                    )
+                                  )
+                         )
+                    
+)
+)
+# Define server logic to summarize and view selected dataset ----
+server <- function(input, output) {
+  
+  # Make title for plot based on input variable ----
+  name <- reactive({
+    if (input$variable=="n") {
+      paste("Total Number of Wildfires")
+    } else if (input$variable=="DURATION_DAYS") {
+      paste("Average Wildfire Duration")
+    } else if (input$variable=="FIRE_SIZE") {
+      paste("Average Size of Wildfires")
+    }
+  })
+  
+  # Make caption for plot based on input variable ----
+  caption <- reactive({
+    if (input$variable=="n") {
+      paste("Number of Wildfires")
+    } else if (input$variable=="DURATION_DAYS") {
+      paste("Wildfire Duration (Days)")
+    }  else if (input$variable=="FIRE_SIZE") {
+      paste("Wildfire Size (Sq. Acres)")
+    }
+  })
+  
+  # Function to plot the requested variable ----
+  plotUSFunc <- function() {
+    plot_usmap(data = fires_state, values = input$variable, color = "gray", labels=TRUE) + 
+      scale_fill_continuous(name = caption(), label = scales::comma, type = "viridis") + 
+      labs(title = paste0(name()," by State between 1992 and 2015"), 
+           caption = "Source: Forest Service Research Data Archive") +
+      theme(plot.title = element_text(face="bold", size = 12, hjust = 0.5), plot.caption = element_text(size = 12, hjust=0), 
+            legend.position = "right", legend.title=element_text(size=12), legend.text = element_text(size=11), 
+            plot.margin = margin(.1,.1,.1,.1, "cm"), panel.background = element_rect(fill = "lightblue"))
+  }
+  
+  name2 <- reactive({
+    if (input$variable2=="n") {
+      paste("Total Number of Wildfires")
+    } else if (input$variable2=="DURATION_DAYS") {
+      paste("Average Wildfire Duration")
+    } else if (input$variable2=="FIRE_SIZE") {
+      paste("Average Size of Wildfires")
+    }
+  })
+  
+  # Make caption for plot based on input variable ----
+  caption2 <- reactive({
+    if (input$variable2=="n") {
+      paste("Number of Wildfires")
+    } else if (input$variable2=="DURATION_DAYS") {
+      paste("Wildfire Duration (Days)")
+    }  else if (input$variable2=="FIRE_SIZE") {
+      paste("Wildfire Size (Sq. Acres)")
+    }
+  })
+  
+  plotStateFunc <- function() {
+    plot_usmap(regions = "county", include=c(input$state), data = fires_county, values = input$variable2, color = "gray") + 
+      scale_fill_continuous(name = caption2(), label = scales::comma, type = "viridis") + 
+      labs(title = paste0(name2(), " in ", input$state, " between 1992 and 2015"), caption = "Source: Forest Service Research Data Archive") +
+      theme(plot.title = element_text(face="bold", size = 12, hjust = 0.5), plot.caption = element_text(size = 12, hjust=0), 
+            legend.position = "right", legend.title=element_text(size=12), legend.text = element_text(size=11), 
+            plot.margin = margin(.1,.1,.1,.1, "cm"), panel.background = element_rect(fill = "lightblue"))
+  }
+  
+  
+  # Generate a plot of the requested variable ----
+  output$usFirePlot <- renderPlot({
+    plotUSFunc()
+  })
+  
+  output$stateFirePlot <- renderPlot({
+    plotStateFunc()
+  })
+  
+  # Return the requested dataset ----
+  datasetInput <- reactive({
+    df <- fires_state_yr[fires_state_yr$state==input$dataset,]
+    df
+  })
+  
+    plotOverall <- function() {
+    ggplot(data = fires_state_yr, aes(x=FIRE_YEAR,y = number_of_fires )) +geom_bar(stat = 'identity', fill = 'red') +
+      geom_smooth(method = 'lm', se = FALSE, size = 0.4, color = 'black') +
+      labs(x = 'Fire Year', y = 'Number of wildfires', title = 'Wildfires by Year in the Entire Country')
+  }
+  output$overallFires <- renderPlot({
+    plotOverall()
+  })
+  
+  
+  output$plot <- renderPlot({
+    ggplot(data = datasetInput(), aes(x=FIRE_YEAR,y = number_of_fires )) +geom_bar(stat = 'identity', fill = 'red') +
+      geom_smooth(method = 'lm', se = FALSE, size = 0.4, color = 'black') +
+      labs(x = 'Fire Year', y = 'Number of wildfires', title = 'Wildfires by Year')
+  })
+  
+  # Generate a summary of the data ----
+  output$summary <- renderTable({
+    summary(datasetInput()[c("number_of_fires")])
+  })
+  
+  # Return the requested pie plot ----
+  pieInput <- reactive({
+    if (input$pie=="Fire Cause") {
+      pie_df <- data.frame(
+        count = causes_count_df$n,
+        label = causes_count_df$STAT_CAUSE_DESCR
+      )
+    } else if (input$pie=="Fire Size") {
+      pie_df = data.frame(
+        count = firesize_count_df$n,
+        label = firesize_count_df$FIRE_SIZE_CLASS
+      )
+    } else if (input$pie=="Owner of Land") {
+      pie_df = data.frame(
+        count = owner_count_df$n,
+        label = owner_count_df$OWNER_DESCR
+      ) 
+    }
+    pie_df
+  })
+  
+  # Function to plot pie ----
+  plotPie <- function() {
+    pieInput() %>%
+      hchart(
+        "pie", hcaes(x = label, y = count),
+        name = "Wildfire Count"
+      )
+  }
+  
+  # Generate a plot of the requested variable ----
+  output$Pieplot <- renderHighchart({
+    plotPie()
+  })
+  
+}
+# Create Shiny app ----
+shinyApp(ui = ui, server = server)
+
+```
